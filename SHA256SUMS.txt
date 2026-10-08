@@ -1,1 +1,1 @@
-e663e53cdf5e7463ac1c2159d18e8b28bb742bf37066dcdf95f21e39b1dc9b2c  ouran-ai-0.18.6-win-x64.zip
+e2d9f63e7780762ab4af93a6db4c236b14eed3e1f637dc5ee492ffd22d6a5008  ouran-ai-0.20.2-win-x64.zip
