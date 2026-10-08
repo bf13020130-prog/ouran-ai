@@ -1,0 +1,91 @@
+name: Publish signed update metadata
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Existing draft Release version to verify and publish
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ouran-release-metadata
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'bf13020130-prog/ouran-ai'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read and verify existing draft assets
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          tag="v$RELEASE_VERSION"
+          test "$(gh release view "$tag" -R "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = true
+          mkdir -p /tmp/ouran-release-assets
+          gh release download "$tag" -R "$GITHUB_REPOSITORY" --dir /tmp/ouran-release-assets
+          node <<'NODE'
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const assert = require('node:assert/strict');
+          (async () => {
+            const root = '/tmp/ouran-release-assets';
+            const manifest = JSON.parse(fs.readFileSync(root + '/latest.json', 'utf8'));
+            assert.equal(manifest.version, process.env.RELEASE_VERSION);
+            assert.equal(manifest.schemaVersion, 1);
+            assert.equal(manifest.channel, 'stable');
+            assert.deepEqual(Object.keys(manifest.assets), ['win32-x64']);
+            const asset = manifest.assets['win32-x64'];
+            assert.equal(asset.kind, 'portable-folder');
+            assert.equal(asset.tag, 'v' + manifest.version);
+            assert.equal(asset.name, 'ouran-ai-' + manifest.version + '-win-x64.zip');
+            assert.equal(fs.statSync(root + '/' + asset.name).size, asset.size);
+            const hash = crypto.createHash('sha256');
+            for await (const chunk of fs.createReadStream(root + '/' + asset.name)) hash.update(chunk);
+            assert.equal(hash.digest('hex'), asset.sha256);
+            assert(manifest.notes.every(note => typeof note === 'string' && note.length <= 1000));
+            fs.copyFileSync(root + '/latest.json', 'latest.json');
+            fs.writeFileSync('VERSION', 'v' + manifest.version + '\n');
+            const checksum = asset.sha256 + '  ' + asset.name + '\n';
+            fs.writeFileSync('SHA256SUMS.txt', checksum);
+            fs.writeFileSync(root + '/SHA256SUMS-v' + manifest.version + '.txt', checksum);
+            const previous = fs.readFileSync('CHANGELOG.md', 'utf8').replace(/^# [^\n]*\n/, '');
+            fs.writeFileSync('CHANGELOG.md', '# 版本说明\n\n## v' + manifest.version + '\n\n' + manifest.notes.map(note => '- ' + note).join('\n') + '\n' + previous);
+            console.log('Existing Windows asset size and SHA-256 verified.');
+          })().catch(error => { console.error(error.message); process.exit(1); });
+          NODE
+      - name: Sign and verify metadata without building application source
+        env:
+          OURAN_UPDATE_SIGNING_PRIVATE_KEY: ${{ secrets.OURAN_UPDATE_SIGNING_PRIVATE_KEY }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const assert = require('node:assert/strict');
+          const key = process.env.OURAN_UPDATE_SIGNING_PRIVATE_KEY;
+          if (!key) throw Error('Update signing secret is missing');
+          const bytes = fs.readFileSync('latest.json');
+          const signature = crypto.sign(null, bytes, key);
+          assert(crypto.verify(null, bytes, crypto.createPublicKey(fs.readFileSync('update-public-key.pem')), signature));
+          fs.writeFileSync('latest.json.sig', signature);
+          console.log('Manifest signed and verified with the existing client public key.');
+          NODE
+      - name: Publish verified Release and metadata
+        run: |
+          set -euo pipefail
+          tag="v$RELEASE_VERSION"
+          gh release upload "$tag" -R "$GITHUB_REPOSITORY" --clobber latest.json.sig "/tmp/ouran-release-assets/SHA256SUMS-$tag.txt"
+          gh release edit "$tag" -R "$GITHUB_REPOSITORY" --draft=false --latest
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add VERSION CHANGELOG.md SHA256SUMS.txt latest.json latest.json.sig
+          git commit -m "release: publish signed $tag metadata"
+          git push origin HEAD:main
