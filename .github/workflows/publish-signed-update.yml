@@ -7,6 +7,11 @@ on:
         description: Existing draft Release version to verify and publish
         required: true
         type: string
+      publish:
+        description: Publish after verification; disable to sign draft assets for native acceptance
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: write
@@ -78,11 +83,16 @@ jobs:
           fs.writeFileSync('latest.json.sig', signature);
           console.log('Manifest signed and verified with the existing client public key.');
           NODE
-      - name: Publish verified Release and metadata
+      - name: Upload signed draft metadata
         run: |
           set -euo pipefail
           tag="v$RELEASE_VERSION"
           gh release upload "$tag" -R "$GITHUB_REPOSITORY" --clobber latest.json.sig "/tmp/ouran-release-assets/SHA256SUMS-$tag.txt"
+      - name: Publish verified Release and metadata
+        if: ${{ inputs.publish }}
+        run: |
+          set -euo pipefail
+          tag="v$RELEASE_VERSION"
           gh release edit "$tag" -R "$GITHUB_REPOSITORY" --draft=false --latest
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
